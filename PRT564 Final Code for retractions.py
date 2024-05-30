@@ -1,0 +1,462 @@
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_val_score, KFold
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn import metrics
+import numpy as np
+from mlxtend.feature_selection import SequentialFeatureSelector as sfs
+from sklearn.decomposition import PCA
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, RocCurveDisplay, PrecisionRecallDisplay
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+# Load the dataset
+file_path = 'retractions35215.csv'
+retractions_df = pd.read_csv(file_path)
+
+# 1. Handle missing values
+# Fill missing values with appropriate placeholders
+retractions_df['Institution'].fillna('Unknown', inplace=True)
+retractions_df['RetractionDOI'].fillna('Unknown', inplace=True)
+retractions_df['OriginalPaperPubMedID'].fillna(0, inplace=True)
+retractions_df['Paywalled'].fillna('Unknown', inplace=True)
+
+# 2. Convert date fields to appropriate datetime formats
+# Convert 'RetractionDate' and 'OriginalPaperDate' to datetime format
+retractions_df['RetractionDate'] = pd.to_datetime(retractions_df['RetractionDate'], format='%m/%d/%Y', errors='coerce')
+retractions_df['OriginalPaperDate'] = pd.to_datetime(retractions_df['OriginalPaperDate'], format='%m/%d/%Y', errors='coerce')
+
+# Handle any potential missing dates by dropping rows with NaT values in date columns
+retractions_df.dropna(subset=['RetractionDate', 'OriginalPaperDate'], inplace=True)
+
+# 3. Create the target variable 'RetractionWithinTwoYears'
+retractions_df['RetractionWithinTwoYears'] = ((retractions_df['RetractionDate'] - retractions_df['OriginalPaperDate']).dt.days <= 730).astype(int)
+
+# 4. Normalize categorical fields
+categorical_fields = ['Subject', 'Institution', 'Journal', 'Publisher', 'Country', 'Author', 'ArticleType', 'RetractionNature', 'Reason', 'Paywalled']
+for field in categorical_fields:
+    retractions_df[field] = retractions_df[field].str.lower()
+
+# Encode categorical variables
+label_encoder = LabelEncoder()
+for column in retractions_df.select_dtypes(include=[object]).columns:
+    retractions_df[column] = label_encoder.fit_transform(retractions_df[column].astype(str))
+
+# Dropping 'Record ID', 'RetractionDOI', 'RetractionPubMedID', 'Title', 'OriginalPaperDOI', 'OriginalPaperPubMedID', 'RetractionNature' as they don't contribute to determining retraction status of the papers
+retractions_df.drop(columns=['Record ID', 'RetractionDOI', 'RetractionPubMedID', 'Title', 'OriginalPaperDOI', 'OriginalPaperPubMedID', 'RetractionNature'], inplace=True)
+
+# Drop the original date columns as they cannot be used directly in the regression model
+retractions_df.drop(columns=['RetractionDate', 'OriginalPaperDate'], inplace=True)
+
+# Generate the correlation matrix
+correlation_matrix = retractions_df.corr()
+
+# Plot the correlation matrix
+plt.figure(figsize=(14, 10))
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f")
+plt.title('Correlation Matrix')
+plt.show()
+
+# Separate explanatory variables (X) from the response variable (y)
+X = retractions_df.drop(columns=['RetractionWithinTwoYears'])
+y = retractions_df['RetractionWithinTwoYears']
+
+# Split dataset into 60% training and 40% test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.4, random_state=0)
+
+# Perform forward selection without scaling
+model = LogisticRegression(max_iter=10000)
+model_fwdsel = sfs(model, k_features=11, forward=True, floating=False, verbose=1, scoring='accuracy')
+model_fwdsel = model_fwdsel.fit(X_train, y_train)
+
+# Get top selected explanatory variables
+selected_features_indices = list(model_fwdsel.k_feature_idx_)
+print("Selected feature indices (non-standardized):", selected_features_indices)
+
+# Reduce the dataset to the selected variables
+X_train_selected = X_train.iloc[:, selected_features_indices]
+X_test_selected = X_test.iloc[:, selected_features_indices]
+
+# Rebuild a logistic regression model using selected features
+model.fit(X_train_selected, y_train)
+
+# Print the intercept and coefficients
+print("Intercept (non-standardized): ", model.intercept_)
+print("Coefficients (non-standardized): ", model.coef_)
+
+# Predict the values of (y) in the test set
+y_pred = model.predict(X_test_selected)
+
+# Compute standard performance metrics
+accuracy = metrics.accuracy_score(y_test, y_pred)
+precision = metrics.precision_score(y_test, y_pred)
+recall = metrics.recall_score(y_test, y_pred)
+f1 = metrics.f1_score(y_test, y_pred)
+
+print("Forward Selection Logistic Regression performance (non-standardized):")
+print("Accuracy: ", accuracy)
+print("Precision: ", precision)
+print("Recall: ", recall)
+print("F1 Score: ", f1)
+
+# Confusion matrix for Logistic Regression (non-standardized)
+cm = confusion_matrix(y_test, y_pred)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1])
+disp.plot()
+plt.title("Confusion Matrix - Logistic Regression (Non-Standardized)")
+plt.show()
+
+# Standardize the features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Perform forward selection on standardized features
+model_fwdsel_scaled = sfs(model, k_features=11, forward=True, floating=False, verbose=1, scoring='accuracy')
+model_fwdsel_scaled = model_fwdsel_scaled.fit(X_train_scaled, y_train)
+
+# Get top selected explanatory variables
+selected_features_indices_scaled = list(model_fwdsel_scaled.k_feature_idx_)
+print("Selected feature indices (standardized):", selected_features_indices_scaled)
+
+# Reduce the dataset to the selected variables
+X_train_selected_scaled = X_train_scaled[:, selected_features_indices_scaled]
+X_test_selected_scaled = X_test_scaled[:, selected_features_indices_scaled]
+
+# Rebuild a logistic regression model using selected features
+model.fit(X_train_selected_scaled, y_train)
+
+# Print the intercept and coefficients
+print("Intercept (standardized): ", model.intercept_)
+print("Coefficients (standardized): ", model.coef_)
+
+# Predict the values of (y) in the test set
+y_pred_scaled = model.predict(X_test_selected_scaled)
+
+# Compute standard performance metrics
+accuracy_scaled = metrics.accuracy_score(y_test, y_pred_scaled)
+precision_scaled = metrics.precision_score(y_test, y_pred_scaled)
+recall_scaled = metrics.recall_score(y_test, y_pred_scaled)
+f1_scaled = metrics.f1_score(y_test, y_pred_scaled)
+
+print("Forward Selection Logistic Regression performance (standardized):")
+print("Accuracy: ", accuracy_scaled)
+print("Precision: ", precision_scaled)
+print("Recall: ", recall_scaled)
+print("F1 Score: ", f1_scaled)
+
+# Confusion matrix for Logistic Regression (standardized)
+cm_scaled = confusion_matrix(y_test, y_pred_scaled)
+disp_scaled = ConfusionMatrixDisplay(confusion_matrix=cm_scaled, display_labels=[0, 1])
+disp_scaled.plot()
+plt.title("Confusion Matrix - Logistic Regression (Standardized)")
+plt.show()
+
+# The rest of the code remains the same
+# Perform PCA on the dataset
+# Compare the cumulative explained variance versus number of PCA components
+pca = PCA().fit(X_train_scaled)
+
+# Plot the cumulative explained variance versus number of PCA components
+plt.figure(figsize=(10, 6))
+plt.plot(np.cumsum(pca.explained_variance_ratio_))
+plt.xticks(range(1, len(pca.explained_variance_ratio_) + 1))
+plt.xlabel('Number of components')
+plt.ylabel('Cumulative explained variance')
+plt.grid()
+plt.show()
+
+# Train a logistic regression on PCA-transformed training data (top-8 components)
+pca = PCA(n_components=8)
+X_train_pca = pca.fit_transform(X_train_scaled)
+X_test_pca = pca.transform(X_test_scaled)
+
+# Compare the dimensionality of the original data vs. its dimensionality reduced version
+print("\n\nDimension of original data:", X_train.shape)
+print("Dimension of PCA-reduced data:", X_train_pca.shape)
+
+# Build a logistic regression model using PCA-transformed data
+model_pca = LogisticRegression(max_iter=10000)
+model_pca.fit(X_train_pca, y_train)
+
+# Predict the values of (y) in the training set using the PCA-transformed data
+y_train_pred_pca = model_pca.predict(X_train_pca)
+y_test_pred_pca = model_pca.predict(X_test_pca)
+
+# Get performance metrics
+accuracy_pca = metrics.accuracy_score(y_test, y_test_pred_pca)
+precision_pca = metrics.precision_score(y_test, y_test_pred_pca)
+recall_pca = metrics.recall_score(y_test, y_test_pred_pca)
+f1_pca = metrics.f1_score(y_test, y_test_pred_pca)
+
+print("\nPCA-based Logistic Regression performance:")
+print("Accuracy: ", accuracy_pca)
+print("Precision: ", precision_pca)
+print("Recall: ", recall_pca)
+print("F1 Score: ", f1_pca)
+
+# Confusion matrix for PCA-based Logistic Regression
+cm_pca = confusion_matrix(y_test, y_test_pred_pca)
+disp_pca = ConfusionMatrixDisplay(confusion_matrix=cm_pca, display_labels=[0, 1])
+disp_pca.plot()
+plt.title("Confusion Matrix - PCA Logistic Regression")
+plt.show()
+
+# Apply standardization on all explanatory variables in training set
+X_train_std = StandardScaler().fit_transform(X_train)
+
+# Compare the cumulative explained variance versus number of PCA components
+pca = PCA().fit(X_train_std)
+
+# Plot the cumulative explained variance versus number of PCA components
+plt.figure(figsize=(10, 6))
+plt.plot(np.cumsum(pca.explained_variance_ratio_))
+plt.xticks(range(1, len(pca.explained_variance_ratio_) + 1))
+plt.xlabel('Number of components')
+plt.ylabel('Cumulative explained variance')
+plt.grid()
+plt.show()
+
+# Train a logistic regression on PCA-transformed training data (top-8 components)
+pca = PCA(n_components=8)
+X_train_std_pca = pca.fit_transform(X_train_std)
+X_test_std_pca = pca.transform(StandardScaler().fit_transform(X_test))
+
+# Compare the dimensionality of the original data vs. its dimensionality reduced version
+print("Dimension of original data:", X_train.shape)
+print("Dimension of PCA-reduced data:", X_train_std_pca.shape)
+
+# Build a logistic regression model
+model_std = LogisticRegression(max_iter=10000)
+model_std.fit(X_train_std_pca, y_train)
+
+# Use logistic regression to predict the values of (y) in the test set
+y_test_pred_std = model_std.predict(X_test_std_pca)
+
+# Get performance metrics
+accuracy_std = metrics.accuracy_score(y_test, y_test_pred_std)
+precision_std = metrics.precision_score(y_test, y_test_pred_std)
+recall_std = metrics.recall_score(y_test, y_test_pred_std)
+f1_std = metrics.f1_score(y_test, y_test_pred_std)
+
+print("\nStandardized PCA-based Logistic Regression performance:")
+print("Accuracy: ", accuracy_std)
+print("Precision: ", precision_std)
+print("Recall: ", recall_std)
+print("F1 Score: ", f1_std)
+
+# Confusion matrix for Standardized PCA-based Logistic Regression
+cm_std = confusion_matrix(y_test, y_test_pred_std)
+disp_std = ConfusionMatrixDisplay(confusion_matrix=cm_std, display_labels=[0, 1])
+disp_std.plot()
+plt.title("Confusion Matrix - Standardized PCA Logistic Regression")
+plt.show()
+
+
+# Evaluate Random Forest model's accuracy performance on the retraction dataset (with and without standardization) on 70% training and 30% test sets
+
+# Separate the dataset into 70% training and 30% test sets
+X_train_rf, X_test_rf, y_train_rf, y_test_rf = train_test_split(X, y, test_size=0.3, random_state=109)
+
+# Apply data transformation to the training set and test set
+scaler_rf = StandardScaler().fit(X_train_rf)
+X_train_transformed_rf = scaler_rf.transform(X_train_rf)
+X_test_transformed_rf = scaler_rf.transform(X_test_rf)
+
+# Build Random Forest models
+# Create two Random Forest models: one with scaler and another without scaler
+model_rf = RandomForestClassifier(random_state=0)
+model_scaled_rf = RandomForestClassifier(random_state=0)
+
+# Fit the models
+model_rf.fit(X_train_rf, y_train_rf)
+model_scaled_rf.fit(X_train_transformed_rf, y_train_rf)
+
+# Evaluate the models by accuracy
+accuracy_rf = model_rf.score(X_test_rf, y_test_rf)
+precision_rf = metrics.precision_score(y_test_rf, model_rf.predict(X_test_rf))
+recall_rf = metrics.recall_score(y_test_rf, model_rf.predict(X_test_rf))
+f1_rf = metrics.f1_score(y_test_rf, model_rf.predict(X_test_rf))
+
+accuracy_scaled_rf = model_scaled_rf.score(X_test_transformed_rf, y_test_rf)
+precision_scaled_rf = metrics.precision_score(y_test_rf, model_scaled_rf.predict(X_test_transformed_rf))
+recall_scaled_rf = metrics.recall_score(y_test_rf, model_scaled_rf.predict(X_test_transformed_rf))
+f1_scaled_rf = metrics.f1_score(y_test_rf, model_scaled_rf.predict(X_test_transformed_rf))
+
+print("\nRandom Forest Accuracy comparison:")
+print("model --> %.3f%%" % (accuracy_rf * 100))
+print("model_scaled --> %.3f%%" % (accuracy_scaled_rf * 100))
+
+# Confusion matrix for Random Forest
+cm_rf = confusion_matrix(y_test_rf, model_rf.predict(X_test_rf))
+disp_rf = ConfusionMatrixDisplay(confusion_matrix=cm_rf, display_labels=[0, 1])
+disp_rf.plot()
+plt.title("Confusion Matrix - Random Forest")
+plt.show()
+
+# Confusion matrix for Standardized Random Forest
+cm_rf_scaled = confusion_matrix(y_test_rf, model_scaled_rf.predict(X_test_transformed_rf))
+disp_rf_scaled = ConfusionMatrixDisplay(confusion_matrix=cm_rf_scaled, display_labels=[0, 1])
+disp_rf_scaled.plot()
+plt.title("Confusion Matrix - Standardized Random Forest")
+plt.show()
+
+# Tuning Random Forest hyperparameters for better classification accuracy
+# Set the parameters by cross-validation
+tuned_parameters = {
+    'n_estimators': [100, 200, 500],
+    'max_features': ['sqrt', 'log2'],  # Corrected parameter values
+    'max_depth': [10, 20, 30, None],
+    'min_samples_split': [2, 5, 10],
+    'min_samples_leaf': [1, 2, 4]
+}
+
+# Perform randomized search
+rf_random = RandomizedSearchCV(estimator=model_rf, param_distributions=tuned_parameters, n_iter=100, cv=3, verbose=2, random_state=0, n_jobs=-1)
+rf_random.fit(X_train_rf, y_train_rf)
+
+# Best parameters
+print("Best parameters found: ", rf_random.best_params_)
+
+# Predict and evaluate
+y_pred_rf_tuned = rf_random.best_estimator_.predict(X_test_rf)
+accuracy_rf_tuned = metrics.accuracy_score(y_test_rf, y_pred_rf_tuned)
+precision_rf_tuned = metrics.precision_score(y_test_rf, y_pred_rf_tuned)
+recall_rf_tuned = metrics.recall_score(y_test_rf, y_pred_rf_tuned)
+f1_rf_tuned = metrics.f1_score(y_test_rf, y_pred_rf_tuned)
+
+print("Random Forest performance after hyperparameter tuning:")
+print("Accuracy: ", accuracy_rf_tuned)
+print("Precision: ", precision_rf_tuned)
+print("Recall: ", recall_rf_tuned)
+print("F1 Score: ", f1_rf_tuned)
+
+# Confusion matrix for Tuned Random Forest
+cm_rf_tuned = confusion_matrix(y_test_rf, y_pred_rf_tuned)
+disp_rf_tuned = ConfusionMatrixDisplay(confusion_matrix=cm_rf_tuned, display_labels=[0, 1])
+disp_rf_tuned.plot()
+plt.title("Confusion Matrix - Tuned Random Forest")
+plt.show()
+
+
+# Apply k-fold cross-validation to improve model performance
+
+# Define the k-fold cross-validator
+kfold = KFold(n_splits=10, shuffle=True, random_state=1)
+
+# Perform k-fold cross-validation for the Logistic Regression model
+cv_results_lr = cross_val_score(model, X, y, cv=kfold, scoring='accuracy')
+print(f"Logistic Regression Accuracy (k-fold): {cv_results_lr.mean():.4f}")
+
+# Perform k-fold cross-validation for the PCA-based Logistic Regression model
+cv_results_pca_lr = cross_val_score(model_pca, PCA(n_components=8).fit_transform(X), y, cv=kfold, scoring='accuracy')
+print(f"PCA-based Logistic Regression Accuracy (k-fold): {cv_results_pca_lr.mean():.4f}")
+
+# Perform k-fold cross-validation for the Random Forest model
+cv_results_rf = cross_val_score(rf_random.best_estimator_, X, y, cv=kfold, scoring='accuracy')
+print(f"Random Forest Accuracy (k-fold): {cv_results_rf.mean():.4f}")
+
+# Perform k-fold cross-validation for the scaled Random Forest model
+cv_results_scaled_rf = cross_val_score(rf_random.best_estimator_, scaler.transform(X), y, cv=kfold, scoring='accuracy')
+print(f"Scaled Random Forest Accuracy (k-fold): {cv_results_scaled_rf.mean():.4f}")
+
+# Plotting performance metrics
+
+# Plot accuracy comparison
+models = ['Logistic Regression', 'Standardized Logistic Regression', 'PCA Logistic Regression', 'Random Forest', 'Random Forest Tuned']
+accuracies = [accuracy, accuracy_scaled, accuracy_pca, accuracy_rf, accuracy_rf_tuned]
+
+plt.figure(figsize=(10, 6))
+sns.barplot(x=models, y=accuracies)
+plt.title('Model Accuracy Comparison')
+plt.ylabel('Accuracy')
+plt.xlabel('Models')
+plt.show()
+
+# Plot precision comparison
+precisions = [precision, precision_scaled, precision_pca, precision_rf, precision_rf_tuned]
+
+plt.figure(figsize=(10, 6))
+sns.barplot(x=models, y=precisions)
+plt.title('Model Precision Comparison')
+plt.ylabel('Precision')
+plt.xlabel('Models')
+plt.show()
+
+# Plot recall comparison
+recalls = [recall, recall_scaled, recall_pca, recall_rf, recall_rf_tuned]
+
+plt.figure(figsize=(10, 6))
+sns.barplot(x=models, y=recalls)
+plt.title('Model Recall Comparison')
+plt.ylabel('Recall')
+plt.xlabel('Models')
+plt.show()
+
+# Plot F1 score comparison
+f1_scores = [f1, f1_scaled, f1_pca, f1_rf, f1_rf_tuned]
+
+plt.figure(figsize=(10, 6))
+sns.barplot(x=models, y=f1_scores)
+plt.title('Model F1 Score Comparison')
+plt.ylabel('F1 Score')
+plt.xlabel('Models')
+plt.show()
+
+# Generate ROC and Precision-Recall curves and lift curve
+
+# Function to plot ROC and PR curves
+def plot_roc_pr_lift(model, X_test, y_test, model_name):
+    RocCurveDisplay.from_estimator(model, X_test, y_test)
+    plt.title(f"ROC Curve - {model_name}")
+    plt.show()
+    
+    PrecisionRecallDisplay.from_estimator(model, X_test, y_test)
+    plt.title(f"Precision-Recall Curve - {model_name}")
+    plt.show()
+    
+    probas = model.predict_proba(X_test)
+    plot_lift_curve(y_test, probas, model_name)
+
+# Function to manually plot the Lift Curve
+def plot_lift_curve(y_test, probas, model_name):
+    df = pd.DataFrame({'y_test': y_test, 'probas': probas[:, 1]})
+    df = df.sort_values(by='probas', ascending=False)
+    
+    df['cumulative_data'] = np.arange(1, len(df) + 1) / len(df)
+    df['cumulative_response'] = df['y_test'].cumsum() / df['y_test'].sum()
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(df['cumulative_data'], df['cumulative_response'], label='Model')
+    plt.plot([0, 1], [0, 1], linestyle='--', label='Random')
+    plt.xlabel('Cumulative Data Percentage')
+    plt.ylabel('Cumulative Response Percentage')
+    plt.title(f'Lift Curve - {model_name}')
+    plt.legend()
+    plt.show()
+
+# Plot ROC, Precision-Recall and Lift curves for Logistic Regression (non-standardized)
+plot_roc_pr_lift(model, X_test_selected, y_test, "Logistic Regression (Non-Standardized)")
+
+# Plot ROC, Precision-Recall and Lift curves for Logistic Regression (standardized)
+plot_roc_pr_lift(model, X_test_selected_scaled, y_test, "Logistic Regression (Standardized)")
+
+# Plot ROC, Precision-Recall and Lift curves for PCA-based Logistic Regression
+plot_roc_pr_lift(model_pca, X_test_pca, y_test, "PCA Logistic Regression")
+
+# Plot ROC, Precision-Recall and Lift curves for Standardized PCA-based Logistic Regression
+plot_roc_pr_lift(model_std, X_test_std_pca, y_test, "Standardized PCA Logistic Regression")
+
+# Plot ROC, Precision-Recall and Lift curves for Random Forest
+plot_roc_pr_lift(model_rf, X_test_rf, y_test_rf, "Random Forest")
+
+# Plot ROC, Precision-Recall and Lift curves for Standardized Random Forest
+plot_roc_pr_lift(model_scaled_rf, X_test_transformed_rf, y_test_rf, "Standardized Random Forest")
+
+# Plot ROC, Precision-Recall and Lift curves for Tuned Random Forest
+plot_roc_pr_lift(rf_random.best_estimator_, X_test_rf, y_test_rf, "Tuned Random Forest")
